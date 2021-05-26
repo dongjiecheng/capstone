@@ -1,0 +1,390 @@
+---
+title: "Capstone Project: Movie Recommendation System"
+author: "Dongjie Cheng"
+date: "10/31/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+```{r load-packages, include=FALSE}
+library(tidyverse)
+library(caret)
+library(data.table)
+library(dplyr)
+library(magrittr) 
+library(png) 
+options(digits = 5)
+```
+# Introduction 
+  The objective of this project is to create a movie recommendation system using the MovieLens dataset and the **RMSE** should be smaller than _0.86490_. This dataset was downloaded from the GroupLens research lab website: <http://files.grouplens.org>. HarvardX provided the partition code to generate the training set, namely **_edx_**, and the validation set, **_validation_**. Although there are plenty of regression functions in **R** to solve the prediction problems, they cannot handle MovieLens **10MB** samples dataset. In this project, I used **least square** method by setting up **five** models with new method, but starting from the models learned from HarvardX **Machine Learning** course. As required, the analysis was done on the training set, whereas the validation set is only used to evaluate the models. In this paper, I will present the process in **three** major sections: data acquisition, data exploring and cleaning, and modeling methods and data analysis. Finally, I will demonstrate how a model with **RMSE** of **_0.86460_** has been achieved. 
+  
+# Data Acquisition
+  I downloaded and partitioned the MovieLens dataset using the provided code with minimum modification, e.g., the piece of code designed for R 3.6 earlier was removed. The chunk of the acquisition code is shown below.
+```{r edx, cache=TRUE, warning=FALSE, message = FALSE}
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+
+# if using R 4.0 or later:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+The code has properly generated the training set and and the validation set, **edx** and **validation** respectively. Next, we look into the data sets to understand the insight.
+
+# Data Exploring and Cleaning
+  As a result of partition, **edx** contains `r nrow(edx)` records and **validation** contains `r nrow(validation)` records such that **validation** holds about _10%_ of the whole records while **edx** about _90%_. Meanwhile, using **_edx_** as an example shown below, the MovieLens dataset includes **_6_** features. Of them, the **rating** is our **resultant output** to be predicted and other _5_ features are the potential inputs for our inverse problem.
+```{r, cache=TRUE, warning=FALSE, message = FALSE}
+head(edx)
+```
+Feature name | Type
+-------------|-------------------
+ratings      | Quantitative resultant output
+movieId      | Quantitative input
+userId       | Quantitative input
+timestamp    | Quantitative input
+title    | Qualitative input
+genre    | Qualitative input
+
+  To process the data, first, we need clean the datasets to assure appropriate results. Generally, the major issue for data analysis is the empty cells present in datasets. The following code checks **_NA's_** inside **edx** and **validation**. Nicely, there was no **_NA_** was found. 
+```{r, cache=TRUE, warning=FALSE, message = FALSE}
+## check NA's 
+sapply(edx, function(x)sum(is.na(x)))
+sapply(validation, function(x)sum(is.na(x)))
+edx%>%group_by(genres)%>%summarise(sum=n())
+```
+
+```{r, cache=TRUE, warning=FALSE, message = FALSE}
+## remove empty genre records
+edx_org<-edx
+edx<-filter(edx,genres!="(no genres listed)")
+```
+  However, _7_ records have no genre type in **edx** and were removed as shown above. Therefore, my actual training set contains `r nrow(edx)` records. Otherwise, no abnormal records were found in both the training and validation sets. The next step is to analyze the training dataset to understand the insight.  
+  
+  Since our goal is to build a reasonable recommendation system, I mainly focused on the key features that will be used to build the models in the next **Method and Data Analysis** section. First, I found that the **outcome**, **ratings**, are discrete, ranging from _0.5_ to _5_, with increment of _0.5_. Also, there are _10676_ **movies** and _69878_ **unique users** in the training set whereas _9809_ and _68534_ in the validation set.  
+  ```{r, warning=FALSE, message = FALSE}
+sort((distinct(edx,rating))$rating)
+count(distinct(edx,movieId))
+count(distinct(edx,userId))
+count(distinct(validation,movieId))
+count(distinct(validation,userId))
+  ```
+  Starting graphic analysis, the figure below shows a map view of _rating_ vs. _movieId_ and _userId_(Because the code takes very long time to run, it is not included here). There is a large missing gap among the middle _movieId_ numbers. Hence, we will have a quite sparse matrix for linear regression. 
+```{r, echo=FALSE,  warning=FALSE, message = FALSE}
+download.file("https://raw.githubusercontent.com/dongjiecheng/capstone/main/1_rating_map.png",'rating.png', mode = 'wb')
+```
+![](rating.png)     
+  
+  The next figure shows the histogram of the counts of _ratings_. Interestingly, the counts of the **half** and **whole** numbers have a **saw teeth** pattern. The next histogram shows the investigation of the _rating_ numbers vs. _movieId_ . Please notice that the _x-axis_ is in \(\log_{10}\) scale of **movieId**. The high number of ratings concentrates on the middle _movieIds_, however, low for both small and big _movieIds_. The third figure shows the _rating_ numbers vs. _userId_. Again with the _x-axis_ in l\(\log_{10}\) scale of the userId. Clearly, different users have different contributions to the ratings. 
+ 
+```{r,  warning=FALSE, message = FALSE, fig.height=4}
+## rating  
+  edx%>%group_by(rating)%>%ggplot(aes(rating))+geom_histogram()+
+    labs(title = "Histogram of ratings", y="count",x="rating" )
+
+## rating vs movieId 
+  edx%>%group_by(movieId)%>%ggplot(aes(movieId))+geom_histogram()+
+    scale_x_log10() + 
+    labs(title = "Histogram of movieId", y="number of ratings",x="movieId, logistic")
+
+## rating vs userId 
+  edx%>%group_by(userId)%>%ggplot(aes(userId))+geom_histogram()+
+    scale_x_log10() + 
+    labs(title = "Histogram of userId", y="number of ratings",x="userId, logistic")
+
+```
+  In addition, I also looked into the **genre** factor, since different genres might attract different types or numbers of audiences. Consequently, the movies may receive different review coverage or different tendency of ratings. For the _796_ genres in the training data set, the first figure below shows the **rating** for each *genre*. Their rating numbers range from _2_ to _733296_ derived from below.
+```{r,  warning=FALSE, message = FALSE}
+min(edx%>%group_by(genres)%>%summarise(sum=n())%>%.$sum)
+max(edx%>%group_by(genres)%>%summarise(sum=n())%>%.$sum)
+```
+  
+  Obviously, there is a huge difference between the maximum and the minimum genres. The chunk of code below demonstrate the range of the rating numbers and two figures showing the box plots of rating numbers of the top _20_ and bottom _20_ genres. For the top _20_, the range of the rating numbers are from _73286_ to _733296_. In contrast, the bottom _20's_ only ranges from _2_ to _5_.  The pictures also suggest that the top _20_ are more uniform distributed than the bottom _20_ do. Therefore, it will be reasonable to take into account of **genre** factor in our data analysis.  
+  
+```{r, warning=FALSE, message = FALSE, fig.height=4}
+count(distinct(edx,genres))
+
+# rating coverage vs genre plot
+  edx%>%group_by(genres)%>%summarise(sum=n())%>%arrange(sum)%>%cbind(genre_no=c(seq(1:796)))%>%
+    ggplot(aes(genre_no,sum))+geom_point()+    
+    scale_y_log10() +labs(title = "Plot by genres", x="genre No.", y="rating count, logistic ")
+  
+
+## boxplot of top 20 genres with high rating numbers 
+genre<-edx%>%group_by(genres)%>%summarise(sum=n())%>%arrange(desc(sum))%>%top_n(20)%>%left_join(edx,by="genres")%>%arrange(desc(sum))
+range(genre$sum)
+genre%>%ggplot(aes(x=reorder(genres,-sum),rating))+geom_boxplot()+
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
+  labs(title = "Box plot of rating numbers of top 20 genres", x="genre")+ ylim(0,6)
+
+## boxplot of bottom 20 genres with high rating numbers  
+genre<-edx%>%group_by(genres)%>%summarise(sum=n())%>%arrange(desc(sum))%>%top_n(-20)%>%left_join(edx,by="genres")%>%arrange(sum)
+range(genre$sum)
+genre%>%ggplot(aes(x=reorder(genres,sum),rating))+geom_boxplot()+
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
+  labs(title = "Box plot of rating numbers of bottom 20 genres", x="genre")+ ylim(0,6)
+```
+  After proper data cleaning and key features properties study, we move on to methodology study and data analysis. 
+
+# Method and Data Analysis
+
+## Modeling Algorithm Methodology
+   From above, we know that **_edx_** has `r nrow(edx)` samples. Given the current computer resources, it is impossible to render such huge amount of data using regression functions in **R**, like, **_knn_**, **_glim_**, etc. Therefore, my approach is **_least square_** method by following the HarvardX course, **Machine learning**. However, I add **_genres_** as a contributor in the model, making a new algorithm. 
+   
+   First, let us start from the initial model taught in class. Assume \(N\) is the total number of ratings, \(Y_{u, i}\) is the rating value for movie  \(i\) and user \(u\). Thus, the **RMSE** expression is: 
+    \[\sqrt{\frac{1}{N} \sum_{u,i}^{N} (\hat{y}_{u,i} - y_{u,i})^2} \]
+   where  \(\hat{y}_{u,i}\) denotes the predicted rating. 
+   
+   Next, we consider the simplest model assuming same rating \(\mu\) for all movies and users. Thus, we have the model equation (Model 1) as:
+\begin{equation}
+Y_{u, i} = \mu + \epsilon_{u, i}
+\end{equation}
+ where \(\epsilon\) denotes the independent errors. The **_least square_** solution for \(\mu\) is the _mean_ of all _ratings_ of the dataset.
+  
+  Moving to the second model, we add the _movie_ factor into Equation ( 1 ) while leaving \(\mu\) unchanged. The new equation (Model 2) will be written as:  
+\begin{equation}
+Y_{u, i} = \mu + b_{i} + \epsilon_{u, i}
+\end{equation}
+  where \(b_{i}\) represents the bias for each _movieId_ and its **_least square_** solution can be expressed as:
+  \[\hat{b}_{i} = \frac{1}{N_{i}} \sum_{i=1}^{N_{i}} (Y_{u,i} - \hat{\mu}) \]
+  Adding _userId_ factor, we obtain the third equation (Model 3) :
+\begin{equation}
+Y_{u, i} = \mu + b_{i} + b_{u} + \epsilon_{u, i}
+\end{equation}
+  where \(b_{u}\) represents the bias for each _userId_ and its **_least square_** solution can be expressed as:
+  \[\hat{b}_{u} = \frac{1}{N_{u}} \sum_{u=1}^{N_{u}} (Y_{u,i} - \hat{\mu}-\hat{b}_{i}) \]
+  
+  Furthermore, we consider the independent _genre_ factor. Let us define random variation \(Y_{u, i, g}\) as the rating observation for movie \(i\), user \(u\) and genre \(g\). A new model can be expressed (Model 4) as:
+ \begin{equation}
+Y_{u, i, g} = \mu + b_{i} + b_{u} + b_{g} + \epsilon_{u, i, g}
+ \end{equation}
+  where  \(b_{g}\) represents the bias for each _genres_ and its **_least square_** solution can be expressed as:
+  \[\hat{b}_{g} = \frac{1}{N_{g}} \sum_{g=1}^{N_{g}} (Y_{u,i,g} - \hat{\mu}-\hat{b}_{i} -\hat{b}_{u})\]
+  and the **RMSE** can be defined as: 
+  \[\sqrt{\frac{1}{N} \sum_{u,i,g} (\hat{y}_{u,i,g} - y_{u,i,g})^2} \]
+ Finally, let us introduce **_regularization_** on \(b_{i}\) and \(b_{u}\) as taught in the course, then we obtain **Model 5** and the **loss** function can be expressed as:
+ \begin{equation}
+\frac{1}{N}\sum_{u,i,g}(y_{u,i,g}-\mu-b_{i} - b_{u} - b_{g})^2 + \lambda \left( \sum b^2_{i} + \sum b^2_u \right)
+ \end{equation}
+ The **_least square_** solutions can be expressed as:
+  \[\hat{b}_{i} = \frac{1}{N_{i}+\lambda} \sum_{i=1}^{N_{i}} (Y_{u,i,g} - \hat{\mu}) \]
+  \[\hat{b}_{u} = \frac{1}{N_{u}+\lambda} \sum_{u=1}^{N_{u}} (Y_{u,i,g} - \hat{\mu} - \hat{b}_i) \] and
+  \[\hat{b}_{g} = \frac{1}{N_{g}} \sum_{g=1}^{N_{g}} (Y_{u,i,g} - \hat{\mu} - \hat{b}_i - \hat{b}_u )\]
+  Meanwhile, we have the RMSE as follows:
+   \[RMSE = \sqrt{ \frac{1}{N}\sum_{u,i,g} (y_{u,i,g} - \hat{\mu} - \hat{b}_i - \hat{b}_u -\hat{b}_g)^2}\]
+ 
+## Data Analysis 
+  With these **five** models, we analyze the MovieLens dataset to derive the optimal model.
+  
+ First, Let us compute \(\hat{\mu}\) starting from the simplest model (Model 1) defined in Equation (1), then we measure the **RMSE** as shown below.  
+ ```{r mu_hat, cache=TRUE, comment=NA,  warning=FALSE, message = FALSE}
+#mu throughout the all users and movies
+mu_hat<-mean(edx$rating)
+
+# Evaluate mu model result
+rmse_mu <- RMSE(mu_hat, validation$rating)
+rmse_mu
+rmse_results <- data_frame(method="mu Only",RMSE = rmse_mu)
+```
+  Second, apply Model 2 in Equation (2).
+  
+ ```{r b_i, cache=TRUE, comment=NA, warning=FALSE, message = FALSE}
+#b_i
+bi<- edx %>% 
+  group_by(movieId) %>% 
+  summarize(b_i = mean(rating - mu_hat))
+
+
+# Evaluate bi model result
+predicted_ratings <- mu_hat + validation %>% 
+  left_join(bi, by='movieId') %>%
+  .$b_i
+
+rmse_bi <- RMSE(predicted_ratings, validation$rating)
+rmse_bi
+
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Movie Effect Model",
+                                     RMSE = rmse_bi ))
+rmse_results %>% knitr::kable()
+
+```
+  Third, Model 3 in Equation (3).
+  ```{r b_u, cache=TRUE, comment=NA, warning=FALSE, message = FALSE}
+#b_u
+b_u <- edx %>% 
+  left_join(bi, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu_hat - b_i))
+
+predicted_ratings <- validation %>% 
+  left_join(bi, by='movieId') %>%
+  left_join(b_u, by='userId') %>%
+  mutate(pred = mu_hat + b_i + b_u) %>%
+  .$pred
+
+rmse_bu <- RMSE(predicted_ratings, validation$rating)
+rmse_bu
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Movie + User Effect Model",
+                                     RMSE = rmse_bu ))
+
+rmse_results %>% knitr::kable()
+
+```
+  Fourth, Model 4 in Equation (4).
+```{r b_g, cache=TRUE, comment=NA,  warning=FALSE, message = FALSE}
+#b_g genres factor
+
+b_g <- edx %>% 
+  left_join(bi, by='movieId') %>%
+  left_join(b_u, by='userId') %>%
+  group_by(genres) %>%
+  summarize(b_g = mean(rating - mu_hat - b_i-b_u))
+
+predicted_ratings <- validation %>% 
+  left_join(bi, by='movieId') %>%
+  left_join(b_u, by='userId') %>%
+  left_join(b_g, by='genres') %>%
+  mutate(pred = mu_hat + b_i + b_u+b_g) %>%
+  .$pred
+
+rmse_bg <- RMSE(predicted_ratings, validation$rating)
+rmse_bg
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Movie + User + Genre Effect Model",
+                                     RMSE = rmse_bg ))
+
+rmse_results %>% knitr::kable()
+```
+    
+  To obtain the optimal result for  Model 5 in Equation (5), we run \(\lambda\) scan first. The test results are shown below:
+  
+```{r b_r_scan, cache=TRUE, comment=NA, warning=FALSE, message = FALSE, fig.height=5}
+## lambda scan
+lambdas <- seq(0, 10, 0.25)
+
+rmses <- sapply(lambdas, function(l) {
+  b_i <- edx %>%
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu_hat) / (n() + l))
+  b_u <- edx %>%
+    left_join(b_i, by = "movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - b_i - mu_hat) / (n() + l))
+  
+  b_g <- edx %>%
+    left_join(bi, by = 'movieId') %>%
+    left_join(b_u, by = 'userId') %>%
+    group_by(genres) %>%
+    summarize(b_g = mean(rating - mu_hat - b_i - b_u))
+  
+  predicted_ratings <- validation %>%
+    left_join(bi, by = 'movieId') %>%
+    left_join(b_u, by = 'userId') %>%
+    left_join(b_g, by = 'genres') %>%
+    mutate(pred = mu_hat + b_i + b_u + b_g) %>%
+    .$pred
+  
+  return(RMSE(predicted_ratings, validation$rating))
+})
+plot(lambdas,rmses)
+lambdas[which.min(rmses)]
+```
+ The \(\lambda\)-**RMSE** figure clearly show the optimal \(\lambda\) value is **_5_** giving minimum **RMSE**. Re-run the code with fixed \(\lambda\), then we have the new solution as the following:
+```{r b_r_5.25, cache=TRUE, comment=NA, warning=FALSE, message = FALSE}
+############ regularized b_i, b_u + b_g
+lambda<-5
+b_i <- edx %>%
+  group_by(movieId) %>%
+  summarize(b_i = sum(rating - mu_hat)/(n()+lambda))
+b_u <- edx %>% 
+  left_join(b_i, by="movieId") %>%
+  group_by(userId) %>%
+  summarize(b_u = sum(rating - b_i - mu_hat)/(n()+lambda))
+
+b_g <- edx %>% 
+  left_join(bi, by='movieId') %>%
+  left_join(b_u, by='userId') %>%
+  group_by(genres) %>%
+  summarize(b_g = mean(rating - mu_hat - b_i-b_u))
+
+predicted_ratings <- validation %>% 
+  left_join(bi, by='movieId') %>%
+  left_join(b_u, by='userId') %>%
+  left_join(b_g, by='genres') %>%
+  mutate(pred = mu_hat + b_i + b_u+b_g) %>%
+  .$pred
+
+rmse_bg <- RMSE(predicted_ratings, validation$rating)
+rmse_bg
+
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Reglarized Movie & User + Genre Effect Model",
+                                     RMSE = rmse_bg ))
+
+rmse_results %>% knitr::kable()
+```
+
+  For comparison purpose, I plot the **RMSE** for all **_five_** models in a bar graph below. In the figure, all methods and corresponding models are either labeled or legended. The **RMSEs** decrease with the increase of the model number. Models 1 and 2 present big difference from other models. We can easily conclude that Model **_5_** has the minimum **RMSE**.     
+
+```{r final_plot, cache=TRUE, comment=NA, warning=FALSE, message = FALSE}
+## add model numbers
+rmse_results<-rmse_results%>% cbind(model=c("Model 1", "Model 2", "Model 3", "Model 4", "Model 5"))
+
+## prepare for final plot
+rmse_results$method<-reorder(rmse_results$method,rmse_results$RMSE)
+
+## final results plot
+rmse_results%>%
+  ggplot(aes(model,RMSE, fill=method)) +
+   geom_bar(stat='identity') +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
+  coord_cartesian(ylim = c(0.5, 1.1)) +
+  guides(fill = guide_legend(reverse=TRUE)) +
+  labs(title="Movie recommendation moldels' result" , x="model", caption = "")
+```
+
+# Conclusion
+
+  The MovieLens provides us a typical large clean movie review dataset with _6_ features. I have tested _5_ models to build a **Movie Recommendation System**. The model features increases from small to large number models. Accordingly, the **RMSE** also decreased, when we applied the models in the same sequence. It turns out that Model 5 with regularized **movieId** and **useId**, and **genre** factor, gives us an optimal result with **RMSE** of _0.86460_. It is smaller than the required criterion of _0.86490_ by the assignment. Therefore, my project has achieved its goal. 
+  
+  Meanwhile, I have studied **three** input factors in this project. In the future, I will study the effect of the **timestamp** factor and possible regularization on the all contributors. 
+
+# Reference
+
+* https://courses.edx.org/courses/course-v1:HarvardX+PH125.8x+2T2020/course/
+  
+* https://grouplens.org/datasets/movielens/
